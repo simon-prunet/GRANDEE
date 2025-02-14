@@ -169,6 +169,21 @@ class PixelUnShuffle(nn.Module):
     def extra_repr(self):
         return 'upscale_factor={}'.format(self.upscale_factor)
 
+class PixelShuffle(nn.Module):
+    r"""Rearranges elements in a Tensor of shape :math:`(*, rC, H)` to a
+    tensor of shape :math:`(*, C, rH)`.
+    see PixelUnShuffle for inverse operation
+    """
+
+    def __init__(self, downscale_factor):
+        super(PixelShuffle, self).__init__()
+        self.downscale_factor = downscale_factor
+
+    def forward(self, input):
+        return pixel_shuffle(input, self.downscale_factor)
+
+    def extra_repr(self):
+        return 'downscale_factor={}'.format(self.donwscale_factor)
 
 # --------------------------------------------
 # conditional batch norm
@@ -506,10 +521,10 @@ def downsample_avgpool(in_channels=64, out_channels=64, kernel_size=3, stride=1,
 # non-local block with embedded_gaussian
 # https://github.com/AlexHex7/Non-local_pytorch
 # --------------------------------------------
-class NonLocalBlock2D(nn.Module):
+class NonLocalBlock1D(nn.Module):
     def __init__(self, nc=64, kernel_size=1, stride=1, padding=0, bias=True, act_mode='B', downsample=False, downsample_mode='maxpool', negative_slope=0.2):
 
-        super(NonLocalBlock2D, self).__init__()
+        super(NonLocalBlock1D, self).__init__()
 
         inter_nc = nc // 2
         self.inter_nc = inter_nc

@@ -552,7 +552,7 @@ class NonLocalBlock1D(nn.Module):
         :return:
         '''
 
-        batch_size = x.size(0)
+        batch_size = x.size()[0]
 
         g_x = self.g(x).view(batch_size, self.inter_nc, -1)
         g_x = g_x.permute(0, 2, 1)
@@ -565,7 +565,7 @@ class NonLocalBlock1D(nn.Module):
 
         y = torch.matmul(f_div_C, g_x)
         y = y.permute(0, 2, 1).contiguous()
-        y = y.view(batch_size, self.inter_nc, *x.size()[2:])
+        y = y.view(batch_size, self.inter_nc, x.size()[-1])
         W_y = self.W(y)
         z = W_y + x
 

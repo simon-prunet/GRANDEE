@@ -66,7 +66,7 @@ class UNet(nn.Module):
 
         # Going down in size
         for nd in range(self.n_downs):
-            xs.append(getattr(self,'m_down%d'%(nd+1),xs[-1]))
+            xs.append(getattr(self,'m_down%d'%(nd+1))(xs[-1]))
         #x2 = self.m_down1(x1)
         #x3 = self.m_down2(x2)
         #x4 = self.m_down3(x3)
@@ -77,7 +77,7 @@ class UNet(nn.Module):
 
         # Going up, with skip connections
         for i, nu in enumerate(range(self.n_downs,0,-1))
-            x = getattr(self, 'm_up%d'%nu, x+xs[-1-i])
+            x = getattr(self, 'm_up%d'%nu)(x+xs[-1-i])
         #x = self.m_up3(x+x4)
         #x = self.m_up2(x+x3)
         #x = self.m_up1(x+x2)
@@ -143,7 +143,7 @@ class UNetRes(nn.Module):
 
         # Going down in size
         for nd in range(self.n_downs):
-            xs.append(getattr(self,'m_down%d'%(nd+1),xs[-1]))
+            xs.append(getattr(self,'m_down%d'%(nd+1))(xs[-1]))
         # x2 = self.m_down1(x1)
         # x3 = self.m_down2(x2)
         # x4 = self.m_down3(x3)
@@ -154,7 +154,7 @@ class UNetRes(nn.Module):
 
         # Going up, with skip connections
         for i, nu in enumerate(range(self.n_downs,0,-1))
-            x = getattr(self, 'm_up%d'%nu, x+xs[-1-i])
+            x = getattr(self, 'm_up%d'%nu)(x+xs[-1-i])
         # x = self.m_up3(x+x4)
         # x = self.m_up2(x+x3)
         # x = self.m_up1(x+x2)
@@ -203,7 +203,6 @@ class ResUNet(nn.Module):
             raise NotImplementedError('upsample mode [{:s}] is not found'.format(upsample_mode))
 
         for nu in range(self.n_downs,0,-1):
-
             setattr(self, 'm_up%d'%(nu), B.sequential(upsample_block(nc[nu], nc[nu-1], bias=False, mode='2'), *[B.IMDBlock(nc[nu-1], nc[nu-1], bias=False, mode='C'+act_mode) for _ in range(nb)]))
         #self.m_up3 = B.sequential(upsample_block(nc[3], nc[2], bias=False, mode='2'), *[B.IMDBlock(nc[2], nc[2], bias=False, mode='C'+act_mode) for _ in range(nb)])
         #self.m_up2 = B.sequential(upsample_block(nc[2], nc[1], bias=False, mode='2'), *[B.IMDBlock(nc[1], nc[1], bias=False, mode='C'+act_mode) for _ in range(nb)])
@@ -221,7 +220,7 @@ class ResUNet(nn.Module):
         xs.append(self.m_head(x))
         # x1 = self.m_head(x)
         for nd n range(self.n_downs):
-            xs.append(getattr(self, 'm_down%d'%(nd+1), xs[-1]))
+            xs.append(getattr(self, 'm_down%d'%(nd+1))(xs[-1]))
         # x2 = self.m_down1(x1)
         # x3 = self.m_down2(x2)
         # x4 = self.m_down3(x3)
@@ -231,7 +230,7 @@ class ResUNet(nn.Module):
         # x = self.m_body(x4)
 
         for i,nu in enumerate(range(self.n_downs,0,-1)):
-            x = getattr(self, 'm_up%d'%nu, x+xs[-1-i])
+            x = getattr(self, 'm_up%d'%nu)(x+xs[-1-i])
         # x = self.m_up3(x+x4)
         # x = self.m_up2(x+x3)
         # x = self.m_up1(x+x2)
@@ -284,7 +283,7 @@ class UNetResSubP(nn.Module):
         else:
             raise NotImplementedError('upsample mode [{:s}] is not found'.format(upsample_mode))
 
-        for i,u in enumerate(range(self.n_downs,0,-1)):
+        for nu in range(self.n_downs,0,-1):
             setattr(self, 'm_up%d'%nu, B.sequential(upsample_block(nc[nu], nc[nu-1], mode='2'+act_mode), *[B.ResBlock(nc[nu-1], nc[nu-1], mode='C'+act_mode+'C') for _ in range(nb)]))
         # self.m_up3 = B.sequential(upsample_block(nc[3], nc[2], mode='2'+act_mode), *[B.ResBlock(nc[2], nc[2], mode='C'+act_mode+'C') for _ in range(nb)])
         # self.m_up2 = B.sequential(upsample_block(nc[2], nc[1], mode='2'+act_mode), *[B.ResBlock(nc[1], nc[1], mode='C'+act_mode+'C') for _ in range(nb)])
@@ -304,7 +303,7 @@ class UNetResSubP(nn.Module):
 
         # Going down in size
         for nd in range(self.n_downs):
-            xs.append(getattr(self, 'm_down%d'%(nd+1), xs[-1]))
+            xs.append(getattr(self, 'm_down%d'%(nd+1))(xs[-1]))
         # x2 = self.m_down1(x1)
         # x3 = self.m_down2(x2)
         # x4 = self.m_down3(x3)
@@ -314,8 +313,8 @@ class UNetResSubP(nn.Module):
         # x = self.m_body(x4)
 
         # Going up, with skip connections
-        for i,u in enumerate(range(self.n_downs,0,-1)):
-            x = getattr(self, 'm_up%d'%(nd), x+xs[-1-i])
+        for i,nu in enumerate(range(self.n_downs,0,-1)):
+            x = getattr(self, 'm_up%d'%(nu))(x+xs[-1-i])
         # x = self.m_up3(x+x4)
         # x = self.m_up2(x+x3)
         # x = self.m_up1(x+x2)
@@ -331,9 +330,10 @@ class UNetResSubP(nn.Module):
 
 
 class UNetPlus(nn.Module):
-    def __init__(self, in_nc=3, out_nc=3, nc=[64, 128, 256, 512], nb=1, act_mode='R', downsample_mode='strideconv', upsample_mode='convtranspose'):
+    def __init__(self, in_nc=3, out_nc=3, n_downs=3, nc=[64, 128, 256, 512], nb=1, act_mode='R', downsample_mode='strideconv', upsample_mode='convtranspose'):
         super(UNetPlus, self).__init__()
 
+        self.n_downs = n_downs # Needed by forward method
         self.m_head = B.conv(in_nc, nc[0], mode='C')
 
         # downsample
@@ -346,9 +346,11 @@ class UNetPlus(nn.Module):
         else:
             raise NotImplementedError('downsample mode [{:s}] is not found'.format(downsample_mode))
 
-        self.m_down1 = B.sequential(*[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[0], nc[1], mode='2'+act_mode[1]))
-        self.m_down2 = B.sequential(*[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[1], nc[2], mode='2'+act_mode[1]))
-        self.m_down3 = B.sequential(*[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[2], nc[3], mode='2'+act_mode[1]))
+        for nd in range(self.n_downs):
+            setattr(self, 'm_down%d'%(nd+1), B.sequential(*[B.conv(nc[nd], nc[nd], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[nd], nc[nd+1], mode='2'+act_mode[1])))
+        #self.m_down1 = B.sequential(*[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[0], nc[1], mode='2'+act_mode[1]))
+        #self.m_down2 = B.sequential(*[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[1], nc[2], mode='2'+act_mode[1]))
+        #self.m_down3 = B.sequential(*[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[2], nc[3], mode='2'+act_mode[1]))
 
         self.m_body  = B.sequential(*[B.conv(nc[3], nc[3], mode='C'+act_mode) for _ in range(nb+1)])
 
@@ -362,22 +364,42 @@ class UNetPlus(nn.Module):
         else:
             raise NotImplementedError('upsample mode [{:s}] is not found'.format(upsample_mode))
 
-        self.m_up3 = B.sequential(upsample_block(nc[3], nc[2], mode='2'+act_mode), *[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb-1)], B.conv(nc[2], nc[2], mode='C'+act_mode[1]))
-        self.m_up2 = B.sequential(upsample_block(nc[2], nc[1], mode='2'+act_mode), *[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb-1)], B.conv(nc[1], nc[1], mode='C'+act_mode[1]))
-        self.m_up1 = B.sequential(upsample_block(nc[1], nc[0], mode='2'+act_mode), *[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb-1)], B.conv(nc[0], nc[0], mode='C'+act_mode[1]))
+        for i,nu in enumerate(range(self.n_downs,0,-1)):
+            setattr(self, 'm_up%d'%nu), B.sequential(upsample_block(nc[nu], nc[nu-1], mode='2'+act_mode), *[B.conv(nc[nu-1], nc[nu-1], mode='C'+act_mode) for _ in range(nb-1)], B.conv(nc[nu-1], nc[nu-1], mode='C'+act_mode[1]))
+        # self.m_up3 = B.sequential(upsample_block(nc[3], nc[2], mode='2'+act_mode), *[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb-1)], B.conv(nc[2], nc[2], mode='C'+act_mode[1]))
+        # self.m_up2 = B.sequential(upsample_block(nc[2], nc[1], mode='2'+act_mode), *[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb-1)], B.conv(nc[1], nc[1], mode='C'+act_mode[1]))
+        # self.m_up1 = B.sequential(upsample_block(nc[1], nc[0], mode='2'+act_mode), *[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb-1)], B.conv(nc[0], nc[0], mode='C'+act_mode[1]))
 
         self.m_tail = B.conv(nc[0], out_nc, mode='C')
 
     def forward(self, x0):
-        x1 = self.m_head(x0)
-        x2 = self.m_down1(x1)
-        x3 = self.m_down2(x2)
-        x4 = self.m_down3(x3)
-        x = self.m_body(x4)
-        x = self.m_up3(x+x4)
-        x = self.m_up2(x+x3)
-        x = self.m_up1(x+x2)
-        x = self.m_tail(x+x1) + x0
+
+        xs = []
+        # Head block
+        xs.append(self.m_head(x0))
+        # x1 = self.m_head(x0)
+
+        # Going down in size
+        for nd in range(self.n_downs):
+            xs.append(getattr(self, 'm_down%d'%(nd+1))(xs[-1]))
+        # x2 = self.m_down1(x1)
+        # x3 = self.m_down2(x2)
+        # x4 = self.m_down3(x3)
+
+        # Lower level
+        x = self.m_body(xs[-1])
+        # x = self.m_body(x4)
+
+        # Going up, with skip connections
+        for i,nu, in enumerate(range(self.n_downs,0,-1)):
+            x = getattr(self, 'm_up%d'%nu)(x+xs[-1])
+        # x = self.m_up3(x+x4)
+        # x = self.m_up2(x+x3)
+        # x = self.m_up1(x+x2)
+
+        # Tail block
+        x = self.m_tail(x+xs[0]) + x0
+        # x = self.m_tail(x+x1) + x0
         return x
 
 '''
@@ -387,11 +409,12 @@ class UNetPlus(nn.Module):
 '''
 
 class NonLocalUNet(nn.Module):
-    def __init__(self, in_nc=3, out_nc=3, nc=[64,128,256,512], nb=1, act_mode='R', downsample_mode='strideconv', upsample_mode='convtranspose'):
+    def __init__(self, in_nc=3, out_nc=3, n_downs=3, nc=[64,128,256,512], nb=1, act_mode='R', downsample_mode='strideconv', upsample_mode='convtranspose'):
         super(NonLocalUNet, self).__init__()
 
-        down_nonlocal = B.NonLocalBlock2D(nc[2], kernel_size=1, stride=1, padding=0, bias=True, act_mode='B', downsample=False, downsample_mode='strideconv')
-        up_nonlocal = B.NonLocalBlock2D(nc[2], kernel_size=1, stride=1, padding=0, bias=True, act_mode='B', downsample=False, downsample_mode='strideconv')
+        self.n_downs = n_downs # Needed by forward method
+        down_nonlocal = B.NonLocalBlock1D(nc[n_downs-1], kernel_size=1, stride=1, padding=0, bias=True, act_mode='B', downsample=False, downsample_mode='strideconv')
+        up_nonlocal = B.NonLocalBlock1D(nc[n_downs-1], kernel_size=1, stride=1, padding=0, bias=True, act_mode='B', downsample=False, downsample_mode='strideconv')
 
         self.m_head = B.conv(in_nc, nc[0], mode='C'+act_mode[-1])
 
@@ -405,12 +428,16 @@ class NonLocalUNet(nn.Module):
         else:
             raise NotImplementedError('downsample mode [{:s}] is not found'.format(downsample_mode))
 
+        for nd in range(self.n_downs-1):
+            setattr(self, 'm_down%d'%(nd+1), B.sequential(*[B.conv(nc[nd], nc[nd], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[nd], nc[nd+1], mode='2'+act_mode)))
+        # self.m_down1 = B.sequential(*[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[0], nc[1], mode='2'+act_mode))
+        # self.m_down2 = B.sequential(*[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[1], nc[2], mode='2'+act_mode))
+        
+        # Last one is special
+        setattr(self,'m_down%d'%self.n_downs, B.sequential(down_nonlocal, *[B.conv(nc[self.n_downs-1], nc[self.n_downs-1], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[self.n_downs-1], nc[self.n_downs], mode='2'+act_mode)))
+        # self.m_down3 = B.sequential(down_nonlocal, *[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[2], nc[3], mode='2'+act_mode))
 
-        self.m_down1 = B.sequential(*[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[0], nc[1], mode='2'+act_mode))
-        self.m_down2 = B.sequential(*[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[1], nc[2], mode='2'+act_mode))
-        self.m_down3 = B.sequential(down_nonlocal, *[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb)], downsample_block(nc[2], nc[3], mode='2'+act_mode))
-
-        self.m_body  = B.sequential(*[B.conv(nc[3], nc[3], mode='C'+act_mode) for _ in range(nb+1)])
+        self.m_body  = B.sequential(*[B.conv(nc[self.n_downs], nc[self.n_downs], mode='C'+act_mode) for _ in range(nb+1)])
 
         # upsample
         if upsample_mode == 'upconv':
@@ -422,23 +449,47 @@ class NonLocalUNet(nn.Module):
         else:
             raise NotImplementedError('upsample mode [{:s}] is not found'.format(upsample_mode))
 
-
-        self.m_up3 = B.sequential(upsample_block(nc[3], nc[2], mode='2'+act_mode), *[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb)], up_nonlocal)
-        self.m_up2 = B.sequential(upsample_block(nc[2], nc[1], mode='2'+act_mode), *[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb)])
-        self.m_up1 = B.sequential(upsample_block(nc[1], nc[0], mode='2'+act_mode), *[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb)])
+        # This one is special too...
+        setattr(self, "m_up%d"%self.n_downs, B.sequential(upsample_block(nc[self.n_downs], nc[self.n_downs-1], mode='2'+act_mode), *[B.conv(nc[self.n_downs-1], nc[self.n_downs-1], mode='C'+act_mode) for _ in range(nb)], up_nonlocal))
+        # self.m_up3 = B.sequential(upsample_block(nc[3], nc[2], mode='2'+act_mode), *[B.conv(nc[2], nc[2], mode='C'+act_mode) for _ in range(nb)], up_nonlocal)
+        
+        # Then going up again
+        for nu in range(self.n_downs-1,0,-1):
+            setattr(self, "m_up%d"%nu, B.sequential(upsample_block(nc[nu], nc[nu-1], mode='2'+act_mode), *[B.conv(nc[nu-1], nc[nu-1], mode='C'+act_mode) for _ in range(nb)]))
+        # self.m_up2 = B.sequential(upsample_block(nc[2], nc[1], mode='2'+act_mode), *[B.conv(nc[1], nc[1], mode='C'+act_mode) for _ in range(nb)])
+        # self.m_up1 = B.sequential(upsample_block(nc[1], nc[0], mode='2'+act_mode), *[B.conv(nc[0], nc[0], mode='C'+act_mode) for _ in range(nb)])
 
         self.m_tail = B.conv(nc[0], out_nc, mode='C')
 
     def forward(self, x0):
-        x1 = self.m_head(x0)
-        x2 = self.m_down1(x1)
-        x3 = self.m_down2(x2)
-        x4 = self.m_down3(x3)
-        x = self.m_body(x4)
-        x = self.m_up3(x+x4)
-        x = self.m_up2(x+x3)
-        x = self.m_up1(x+x2)
-        x = self.m_tail(x+x1) + x0
+
+        xs = []
+
+        # Head block
+        xs.append(self.m_head(x0))
+        # x1 = self.m_head(x0)
+
+        # Going down in size
+        for nd in range)self.n_downs):
+            xs.append(getattr(self, "m_down%d"%(nd+1))(xs[-1]))
+        # x2 = self.m_down1(x1)
+        # x3 = self.m_down2(x2)
+        # x4 = self.m_down3(x3)
+        
+        # Lower level
+        x = self.m_body(xs[-1])
+        # x = self.m_body(x4)
+
+        # Going up, with skip connections
+        for i, nu in enumerate(range(self.n_downs,0,-1)):
+            x = getattr(self,'m_up%d'%nd)(x+xs[-1-i])
+        # x = self.m_up3(x+x4)
+        # x = self.m_up2(x+x3)
+        # x = self.m_up1(x+x2)
+
+        # Tail block
+        x = self.m_tail(x+xs[0]) + x0
+        # x = self.m_tail(x+x1) + x0
         return x
 
 

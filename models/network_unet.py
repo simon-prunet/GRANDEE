@@ -495,7 +495,7 @@ class NonLocalUNet(nn.Module):
 
 
 if __name__ == '__main__':
-    x = torch.rand(1,3,256,256)
+    x = torch.rand(1,3,256)
 #    net = UNet(act_mode='BR')
     net = NonLocalUNet()
     net.eval()

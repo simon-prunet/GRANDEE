@@ -29,7 +29,11 @@ class Simulator(Dataset):
         scale = np.random.uniform(low=self.scale_range[0],high=self.scale_range[1])
         amplitudes = np.random.uniform(low=self.amplitude_range[0],high=self.amplitude_range[1],size=self.in_nc)
         # Typical peal
-        peak_scale = (self.a-1)**(self.a-1)/ssp.factorial(self.a-1)/scale * np.exp(-(self.a-1))
+        # position of maximum of derivative dergamma (with loc=0)
+        # This is to make sure that SNR=1 at peak if sigma=amplitude=1
+        x1 = scale*(self.a-1 - np.sqrt(self.a-1))
+        peak_scale = mygamma(np.array([x1,]), a=self.a, scale=scale)/scale / (np.sqrt(self.a-1)-1)
+
         if sigma_in is not None:
             sigma = sigma_in * peak_scale
         else:
@@ -39,7 +43,7 @@ class Simulator(Dataset):
         traces = np.zeros((self.in_nc, self.n_samples))
         noisy = np.zeros((self.in_nc+1,self.n_samples))
         for i in range(self.in_nc):
-            traces[i,:] = mygamma(np.arange(1,self.n_samples+1,dtype=float), a=self.a, scale=scale,loc=loc)*amplitudes[i]
+            traces[i,:] = dergamma(np.arange(1,self.n_samples+1,dtype=float), a=self.a, scale=scale,loc=loc)*amplitudes[i]
             noisy[i+1,:]= traces[i,:] + sigma*np.random.standard_normal(self.n_samples)
         # Add noise amplitude in first line of noisy array
         noisy[0,:] = sigma

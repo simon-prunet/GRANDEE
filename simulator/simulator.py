@@ -1,14 +1,14 @@
 from torch.utils.data import Dataset
 import numpy as np
-from gamma import dergamma, mygamma
+from .gamma import dergamma, mygamma
 import scipy.special as ssp
 
 class Simulator(Dataset):
 
     def __init__(self, in_nc=3, n_samples=8192, a=4, 
-                 sigma_range=[0.1,10.], amplitude_range=[0.1,10.],
+                 sigma_range=[0.1,1.], amplitude_range=[0.1,10.],
                  scale_range=[1.,30.],loc_range=[100,8000],
-                 length=10000):
+                 length=100000):
 
 
         self.a = a # Gamma function derivative parameter
@@ -41,14 +41,12 @@ class Simulator(Dataset):
 
 
         traces = np.zeros((self.in_nc, self.n_samples))
-        noisy = np.zeros((self.in_nc+1,self.n_samples))
+        noisy  = np.zeros((self.in_nc, self.n_samples))
         for i in range(self.in_nc):
             traces[i,:] = dergamma(np.arange(1,self.n_samples+1,dtype=float), a=self.a, scale=scale,loc=loc)*amplitudes[i]
-            noisy[i+1,:]= traces[i,:] + sigma*np.random.standard_normal(self.n_samples)
-        # Add noise amplitude in first line of noisy array
-        noisy[0,:] = sigma
+            noisy[i,:]= traces[i,:] + sigma*np.random.standard_normal(self.n_samples)
 
-        return (noisy, traces)
+        return (sigma,noisy,traces)
     
 
 

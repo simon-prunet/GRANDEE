@@ -104,7 +104,7 @@ if __name__=='__main__':
         dataset, 
         batch_size=64  
     )
-    model = PRUNet(in_nc = 3)
+    model = PRUNet(in_nc=3)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     trainer = Trainer(model, train_loader)

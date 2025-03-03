@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from simulator.simulator import Simulator
+from argparse import ArgumentParser
 import matplotlib.pyplot as plt 
 
 class PRUNet(UNetRes):
@@ -88,26 +89,41 @@ def visualize_denoising(model, dataset, num_samples=5):
     plt.tight_layout()
     plt.show()
 
-if __name__=='__main__':
+def parse_args():
+    parser = ArgumentParser(description="Train and test PRUNet on GPU cluster")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use (cuda or cpu)")
+    parser.add_argument("--model_path", type=str, default=None, help="Path to save/load the model")
+    parser.add_argument("--save_plot", action="store_true", help="Save the denoising plot instead of displaying it")
+    parser.add_argument("--plot_path", type=str, default="denoising_plot.png", help="Path to save the plot")
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    
     dataset = Simulator(
-    in_nc=3,
-    n_samples=256,
-    a=4,
-    sigma_range=[0.1, 0.5],
-    amplitude_range=[0.1, 1.],
-    scale_range=[1., 2.],
-    loc_range=[100,150],
-    length=256
+        in_nc=3,
+        n_samples=256,
+        a=4,
+        sigma_range=[0.1, 0.5],
+        amplitude_range=[0.1, 1.],
+        scale_range=[1., 2.],
+        loc_range=[100,150],
+        length=256
     )
-
-    train_loader = DataLoader(
-        dataset, 
-        batch_size=64  
-    )
+    train_loader = DataLoader(dataset, batch_size=args.batch_size)
+    
     model = PRUNet(in_nc=3)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    trainer = Trainer(model, train_loader)
-    trainer.train(num_epochs=50)
-    visualize_denoising(model, dataset, num_samples=5)
+    trainer = Trainer(model, train_loader, lr=args.lr, device=args.device)
+    
 
+    trainer.train(num_epochs=args.epochs)
+    
+ 
+    torch.save(model.state_dict(), args.model_path)
+    print(f"Model saved to {args.model_path}")

@@ -90,7 +90,7 @@ def visualize_denoising(model, dataset, num_samples=5):
     plt.show()
 
 def parse_args():
-    parser = ArgumentParser(description="Train and test PRUNet on GPU cluster")
+    parser = ArgumentParser(description="Train PRUNet")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")

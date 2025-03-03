@@ -96,8 +96,6 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use (cuda or cpu)")
     parser.add_argument("--model_path", type=str, default=None, help="Path to save/load the model")
-    parser.add_argument("--save_plot", action="store_true", help="Save the denoising plot instead of displaying it")
-    parser.add_argument("--plot_path", type=str, default="denoising_plot.png", help="Path to save the plot")
     return parser.parse_args()
 
 

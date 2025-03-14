@@ -165,6 +165,102 @@ class UNetRes(nn.Module):
 
         return x
 
+class UNetResNoise(nn.Module):
+    def __init__(self, in_nc=1, out_nc=1, n_downs=3, nc=[64, 128, 256, 512], nb=4, act_mode='R', downsample_mode='strideconv', upsample_mode='convtranspose'):
+        super(UNetResNoise, self).__init__()
+
+        # Here we assume that in_nc refers to data only, hence the +1 in m_head to account for noise
+        self.n_downs = n_downs # Needed by forward method
+        self.m_head = B.conv(in_nc+1, nc[0], bias=False, mode='C')
+
+        # downsample
+        if downsample_mode == 'avgpool':
+            downsample_block = B.downsample_avgpool
+        elif downsample_mode == 'maxpool':
+            downsample_block = B.downsample_maxpool
+        elif downsample_mode == 'strideconv':
+            downsample_block = B.downsample_strideconv
+        else:
+            raise NotImplementedError('downsample mode [{:s}] is not found'.format(downsample_mode))
+
+        # Downsample
+        # Add one to nc[nd], to account for noise embedding channel. Last block does not add 1, as noise will be concatenated anew separately
+        for nd in range(self.n_downs):
+            setattr(self, 'm_down%d'%(nd+1), B.sequential(*[B.ResBlock(nc[nd]+1, nc[nd]+1, bias=False, mode='C'+act_mode+'C') for _ in range(nb)], downsample_block(nc[nd]+1, nc[nd+1], bias=False, mode='2')))
+        # Use the following for the first (noise embedding) channel    
+        self.m_noise_down = downsample_block(1,1,bias=False,mode='2')
+        
+        # Lowest level. First ResBlock is separate as it is of in_nc = out_nc+1. Others have in_nc=out_nc
+        self.m_body  = B.sequential(B.ResBlock(nc[self.n_downs]+1, nc[self.n_downs], bias=False, mode='C'+act_mode+'C'), *[B.ResBlock(nc[self.n_downs], nc[self.n_downs], bias=False, mode='C'+act_mode+'C') for _ in range(nb-1)])
+
+        # upsample
+        if upsample_mode == 'upconv':
+            upsample_block = B.upsample_upconv
+        elif upsample_mode == 'pixelshuffle':
+            upsample_block = B.upsample_pixelshuffle
+        elif upsample_mode == 'convtranspose':
+            upsample_block = B.upsample_convtranspose
+        else:
+            raise NotImplementedError('upsample mode [{:s}] is not found'.format(upsample_mode))
+
+        for nu in range(self.n_downs,0,-1):
+            setattr(self, 'm_up%d'%(nu), B.sequential(upsample_block(nc[nu]+1, nc[nu-1], bias=False, mode='2'), *[B.ResBlock(nc[nu-1], nc[nu-1], bias=False, mode='C'+act_mode+'C') for _ in range(nb)]))
+        
+        self.m_tail = B.conv(nc[0]+1, out_nc, bias=False, mode='C')
+
+    def mycat(self, n, x):
+        '''
+        Concatenate noise slice on channel dimension, where dimensions are assumed to be (batch, channel, time)
+        '''
+        nbx, _ , ntx = x.shape
+        nbn, ncn , ntn = n.shape
+        # Check dimensions are compatible, with assert statements
+        
+        # Concatenate on channel dimension
+        return torch.cat((n,x), dim=1)
+
+    def myskip_add(self,x1,x2):
+        '''
+        Add tensors, but only on the data channels, preserving the noise channel
+        '''
+        x = torch.clone(x1)
+        x[:,1:,:] += x2[:,1:,:]
+        return(x)
+
+    def forward(self, x0,noise):
+
+        xs = []
+        noises = [noise,]
+    
+        # First block
+        x = self.mycat(noise,x0)
+        res = self.m_head(x)
+        xs.append(self.mycat(noise,res))
+        # x1 = self.m_head(x0)
+
+        # Going down in size
+        for nd in range(self.n_downs):
+            noises.append(self.m_noise_down(noises[-1]))
+            res = getattr(self,'m_down%d'%(nd+1))(xs[-1])
+            xs.append(self.mycat(noises[-1],res))
+
+        # Lower level
+
+        x = self.mycat(noises[-1],self.m_body(xs[-1]))
+        # x = self.m_body(x4)
+
+        # Going up, with skip connections
+        for i, nu in enumerate(range(self.n_downs,0,-1)):
+            x = self.mycat(noises[-1-i],getattr(self, 'm_up%d'%nu)(self.myskip_add(x,xs[-1-i]) ))
+        # x = self.m_up3(x+x4)
+        # x = self.m_up2(x+x3)
+        # x = self.m_up1(x+x2)
+
+        # Last block
+        x = self.m_tail(self.myskip_add(x,xs[0]))
+        # x = self.m_tail(x+x1)
+
+        return x
 
 class ResUNet(nn.Module):
     def __init__(self, in_nc=1, out_nc=1, n_downs=3, nc=[64, 128, 256, 512], nb=4, act_mode='L', downsample_mode='strideconv', upsample_mode='convtranspose'):

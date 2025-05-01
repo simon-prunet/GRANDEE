@@ -1,6 +1,6 @@
 from torch.utils.data import Dataset
 import numpy as np
-from .gamma import dergamma, mygamma
+from simulator.gamma import dergamma, mygamma
 import scipy.special as ssp
 
 class Simulator(Dataset):
@@ -46,12 +46,5 @@ class Simulator(Dataset):
             traces[i,:] = dergamma(np.arange(1,self.n_samples+1,dtype=float), a=self.a, scale=scale,loc=loc)*amplitudes[i]
             noisy[i,:]= traces[i,:] + sigma*np.random.standard_normal(self.n_samples)
 
-        return (sigma,noisy,traces)
+        return (sigma, noisy,traces)
     
-
-
-
-
-
-
-

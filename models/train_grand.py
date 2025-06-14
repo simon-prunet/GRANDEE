@@ -1,91 +1,133 @@
 import os
 import torch
+import json
 from torch.utils.data import Dataset, DataLoader, random_split
 import grand.dataio.root_files as froot
 import glob
 import numpy as np
 from functools import lru_cache
 import time
+from torch.profiler import profile, record_function, ProfilerActivity
 import logging
 import torch.nn as nn
 import torch.optim as optim
 from matplotlib import pyplot as plt
+import re 
 
 import basicblock as B
 
-class GRAND_DC2_TracesDataset(Dataset):
-    def __init__(self, rootpath='/sps/grand/DC2Training/ZHAireS', dataset='NJ', 
-                 what='efield', level='L0', num_realizations=5, 
-                 trace_length=8192, noise_range=(0.1, 10), normalize=True):
-        self.datadir = f"{rootpath}-{dataset}"
-        self.what = what
-        self.level = level
-        self.num_realizations = num_realizations
-        self.trace_length = trace_length
-        self.noise_range = noise_range
-        self.normalize = normalize
-        self.trace_indices = []
-        self._precompute_indices() 
-        
-    def _precompute_indices(self):
-        """Precompute all accessible trace indices with realizations"""
-        base_indices = []
-        for event_idx in range(6000):  
-            try:
-                ef3d = self._load_event_data(event_idx)
-                n_antennas = ef3d.traces.shape[0]
-                base_indices.extend((event_idx, ant_idx) 
-                                 for ant_idx in range(n_antennas))
-            except FileNotFoundError:
-                continue
-            
-        self.trace_indices = [
-            (e, a, r)
-            for e, a in base_indices
-            for r in range(self.num_realizations)
-        ]
-        
-        print(f"Dataset: {len(base_indices)} unique traces → "
-              f"{len(self.trace_indices)} total items")
+import time
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
 
-    @lru_cache(maxsize=100) 
-    def _load_event_data(self, event_idx):
-        """Cached event data loading"""
-        filename = self._get_file_name(event_idx)
-        return froot.get_handling3dtraces(filename, event_idx % 1000)
+class GRAND_H5_TracesDataset(Dataset):
+    def __init__(self, h5_file_path='/sps/grand/selbouch/h5_files/grand_data.h5', 
+                 num_realizations=5, snr_range_db=(-10, 20), normalize=True, 
+                 chunk_size=200, cache_size=2):
+        
+        self.h5_file_path = h5_file_path
+        self.num_realizations = num_realizations
+        self.snr_range_db = snr_range_db  # SNR range in dB
+        self.normalize = normalize
+        self.chunk_size = chunk_size
+        self.cache_size = cache_size
+        
+        with h5py.File(h5_file_path, 'r') as f:
+            self.total_traces = f['traces'].shape[0]
+            self.trace_shape = f['traces'].shape[1:]
+        
+        self._length = self.total_traces * num_realizations
+        self.cache = {}
+        self.cache_order = []
+        
+        print(f"Dataset: {self.total_traces} traces of shape {self.trace_shape}")
+        print(f"SNR range: {snr_range_db[0]} to {snr_range_db[1]} dB")
+    
+    def _get_chunk_id(self, trace_idx):
+        return trace_idx // self.chunk_size
+
+    def _load_chunk(self, chunk_id):
+        if chunk_id in self.cache:
+            # Move to end for LRU
+            self.cache_order.remove(chunk_id)
+            self.cache_order.append(chunk_id)
+            return self.cache[chunk_id]
+        
+        # Load new chunk
+        start_idx = chunk_id * self.chunk_size
+        end_idx = min(start_idx + self.chunk_size, self.total_traces)
+        
+        with h5py.File(self.h5_file_path, 'r') as f:
+            chunk_data = torch.from_numpy(f['traces'][start_idx:end_idx]).float()
+        
+        # Cache management
+        if len(self.cache) >= self.cache_size:
+            oldest = self.cache_order.pop(0)
+            del self.cache[oldest]
+        
+        self.cache[chunk_id] = chunk_data
+        self.cache_order.append(chunk_id)
+        
+        return chunk_data
 
     def __len__(self):
-        return len(self.trace_indices)
+        return self._length
     
     def __getitem__(self, idx):
-        event_idx, ant_idx, realization_idx = self.trace_indices[idx]
+        trace_idx = idx // self.num_realizations
+        chunk_id = self._get_chunk_id(trace_idx)
         
-        clean_trace = self._load_event_data(event_idx).traces[ant_idx]
+        chunk_data = self._load_chunk(chunk_id)
+        chunk_offset = trace_idx - (chunk_id * self.chunk_size)
+        clean_trace = chunk_data[chunk_offset].clone()
         
+        # Normalize if requested
         if self.normalize:
-            max_val = np.max(np.abs(clean_trace)) + 1e-8
-            clean_trace = clean_trace / max_val
-            
-        clean_tensor = torch.as_tensor(clean_trace, dtype=torch.float32)
+            # Use robust normalization
+            global_std = torch.std(clean_trace) + 1e-8
+            global_mean = torch.mean(clean_trace)
+            clean_trace = (clean_trace - global_mean) / global_std
         
-        sigma = torch.empty(1).uniform_(*self.noise_range).item()
-        noise = torch.randn_like(clean_tensor) * sigma
+        # SNR-based noise addition
+        snr_db = torch.empty(1).uniform_(*self.snr_range_db).item()
+        snr_linear = 10 ** (snr_db / 10)
+        
+        # Calculate signal power (per channel)
+        signal_power = torch.mean(clean_trace ** 2, dim=-1, keepdim=True)
+        
+        # Calculate noise power based on desired SNR
+        noise_power = signal_power / snr_linear
+        noise_std = torch.sqrt(noise_power)
+        
+        # Generate noise with appropriate power
+        noise = torch.randn_like(clean_trace) * noise_std
+        noisy_trace = clean_trace + noise
+        
+        # Convert SNR to a normalized sigma value for the model
+        # Map SNR range to a reasonable sigma range (e.g., 0.01 to 1.0)
+        sigma_min, sigma_max = 0.01, 1.0
+        snr_min, snr_max = self.snr_range_db
+        sigma = sigma_min + (sigma_max - sigma_min) * (snr_max - snr_db) / (snr_max - snr_min)
         
         return (
             torch.tensor(sigma, dtype=torch.float32),
-            clean_tensor + noise,
-            clean_tensor
+            noisy_trace,
+            clean_trace
         )
-            
-    def _get_file_name(self, index):
-        num_file = index // 1000
-        fileroot = 'sim_Xiaodushan_20221025_220000_RUN0_CD_ZHAireS_'
-        filename = f"{fileroot}{num_file:04d}"
-        efield_files = glob.glob(f"{self.datadir}/{filename}/{self.what}*{self.level}*")
+
+    def close(self):
+        """Clean up cache"""
+        if hasattr(self, 'cache'):
+            self.cache.clear()
+            self.cache_order.clear()
         
-        if not efield_files:
-            raise FileNotFoundError(f"No {self.level} files found for index {index}")
-        return efield_files[0]
+    def __del__(self):
+        """Clean up cache when object is deleted"""
+        if hasattr(self, 'cache'):
+            self.cache.clear()
+            self.cache_order.clear()
 
 class UNetRes(nn.Module):
     def __init__(self, in_nc=1, out_nc=1, n_downs=3, nc=[64, 128, 256, 512], nb=4, act_mode='R', downsample_mode='strideconv', upsample_mode='convtranspose'):
@@ -107,10 +149,8 @@ class UNetRes(nn.Module):
         for nd in range(self.n_downs):
             setattr(self, 'm_down%d'%(nd+1), B.sequential(*[B.ResBlock(nc[nd], nc[nd], bias=False, mode='C'+act_mode+'C') for _ in range(nb)], downsample_block(nc[nd], nc[nd+1], bias=False, mode='2')))
        
-
         self.m_body  = B.sequential(*[B.ResBlock(nc[self.n_downs], nc[self.n_downs], bias=False, mode='C'+act_mode+'C') for _ in range(nb)])
         
-        # upsample
         if upsample_mode == 'upconv':
             upsample_block = B.upsample_upconv
         elif upsample_mode == 'pixelshuffle':
@@ -125,7 +165,6 @@ class UNetRes(nn.Module):
         self.m_tail = B.conv(nc[0], out_nc, bias=False, mode='C')
 
     def forward(self, x0):
-
         xs = []
         xs.append(self.m_head(x0))
         for nd in range(self.n_downs):
@@ -140,14 +179,20 @@ class UNetRes(nn.Module):
         return x
 
 class PRUNet(UNetRes):
-
-    def __init__(self, in_nc=3, n_downs=3, nc=[64, 128, 256, 512], nb=2):
-
-        super(PRUNet,self).__init__(in_nc=in_nc+1, out_nc=in_nc, n_downs=n_downs, nc=nc, nb=nb)
-
+    def __init__(self, in_nc=3, n_downs=3, nc=[64, 128, 256, 512], nb=2, use_batch_norm=True):
+        act_mode = 'R'
+        mode_str = 'CB' + act_mode if use_batch_norm else 'C' + act_mode
+        
+        super(PRUNet, self).__init__(
+            in_nc=in_nc+1, 
+            out_nc=in_nc, 
+            n_downs=n_downs, 
+            nc=nc, 
+            nb=nb,
+            act_mode=act_mode
+        )
     
     def forward(self, x, sigma=None):
-        
         if sigma is None:
             sigma = torch.ones(1, device=x.device) * 0.1
             
@@ -161,52 +206,153 @@ class PRUNet(UNetRes):
         xx = torch.cat((sigma,x),dim=1)    
         return super(PRUNet,self).forward(xx)
 
+def find_latest_checkpoint(output_dir):
+    """Find the most recent checkpoint with proper numerical sorting"""
+    import glob
+    import re
+    
+    checkpoint_pattern = os.path.join(output_dir, "checkpoint_epoch_*.pt")
+    checkpoints = glob.glob(checkpoint_pattern)
+    
+    if not checkpoints:
+        return None
+    
+    def extract_epoch_batch(filename):
+        # Extract epoch and batch from filename
+        basename = os.path.basename(filename)
+        match = re.search(r'checkpoint_epoch_(\d+)(?:_batch_(\d+))?\.pt', basename)
+        if match:
+            epoch = int(match.group(1))
+            batch = int(match.group(2)) if match.group(2) else -1
+            return (epoch, batch)
+        return (0, -1)
+    
+    # Sort by epoch then by batch numerically
+    latest = max(checkpoints, key=extract_epoch_batch)
+    epoch, batch = extract_epoch_batch(latest)
+    print(f"Found latest checkpoint: epoch {epoch}, batch {batch if batch != -1 else 'end'}")
+    
+    return latest
 
 class Trainer:
-    def __init__(self, model, dataloader, val_dataloader=None, lr=1e-4, output_dir='./output'):
+    def __init__(self, model, dataloader, lr=1e-4, output_dir='./output'):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.dataloader = dataloader
-        self.val_dataloader = val_dataloader
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.current_epoch = 0
-        
+        self.global_step = 0 
         self.train_losses = []
-        self.val_losses = []
         self.learning_rates = []
         self.peak_memory = 0
-        
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
-        )
         
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(f"{output_dir}/checkpoints", exist_ok=True)
         self.output_dir = output_dir
-        self.best_val_loss = float('inf')
 
     def training_step(self, batch):
+        data_start = time.time()
+        
         torch.cuda.empty_cache()
         sigma, noisy, clean = batch
         sigma = sigma.to(self.device).float()
         noisy = noisy.to(self.device).float()
         clean = clean.to(self.device).float()
         
+        data_time = time.time() - data_start
+        
+        forward_start = time.time()
         self.optimizer.zero_grad(set_to_none=True)
         x_hat = self.model(noisy, sigma)
+        
+        forward_time = time.time() - forward_start
+        
+        backward_start = time.time()
         loss = self.criterion(x_hat, clean)
+        if loss.item() > 100:
+            print(f"Warning: High loss value detected: {loss.item()} at step {self.global_step}, sigma={sigma[0].item()}")
+    
         loss.backward()
-        self.optimizer.step()
+        del x_hat, noisy, clean, sigma
 
+        # Aggressive cleanup every 50 steps
+        if self.global_step % 50 == 0:
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        self.optimizer.step()
+        
+        backward_time = time.time() - backward_start
+        
+        if self.global_step % 10 == 0:
+            print(f"Step {self.global_step} - Data: {data_time:.4f}s, Forward: {forward_time:.4f}s, Backward: {backward_time:.4f}s")
+        
+        self.global_step += 1
+        
         current_memory = torch.cuda.max_memory_allocated() / (1024 ** 2)
         self.peak_memory = max(self.peak_memory, current_memory)
         return loss.item()
 
-    def train(self, start_epoch=0, num_epochs=20, patience=10):
+    def save_checkpoint(self, epoch, batch_idx=None):
+        """Save model checkpoint with zero-padded naming"""
+        self.current_epoch = epoch  
+        
+        checkpoint = {
+            'epoch': epoch + 1,  
+            'batch_idx': batch_idx,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'train_losses': self.train_losses,
+            'learning_rates': self.learning_rates,
+            'rng_state': torch.get_rng_state(),
+            'cuda_rng_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+        }
+        
+        # Use checkpoints subdirectory with zero-padded naming
+        checkpoint_dir = f"{self.output_dir}/checkpoints"
+        if batch_idx is not None:
+            checkpoint_path = f"{checkpoint_dir}/checkpoint_epoch_{epoch:03d}_batch_{batch_idx:06d}.pt"
+        else:
+            checkpoint_path = f"{checkpoint_dir}/checkpoint_epoch_{epoch:03d}.pt"
+        
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Checkpoint saved: {checkpoint_path}")
+        
+        # Keep only the 3 most recent checkpoints
+        self._cleanup_old_checkpoints()
+    
+    def _cleanup_old_checkpoints(self):
+        """Remove old checkpoints, keeping only the most recent ones"""
+        import glob
+        import re
+        
+        checkpoint_dir = f"{self.output_dir}/checkpoints"
+        checkpoint_files = glob.glob(f"{checkpoint_dir}/checkpoint_epoch_*.pt")
+        
+        def get_checkpoint_info(filename):
+            basename = os.path.basename(filename)
+            match = re.search(r'checkpoint_epoch_(\d+)(?:_batch_(\d+))?\.pt', basename)
+            if match:
+                epoch = int(match.group(1))
+                batch = int(match.group(2)) if match.group(2) else -1
+                return (epoch, batch, filename)
+            return (0, -1, filename)
+        
+        # Sort checkpoints by epoch and batch
+        sorted_checkpoints = sorted([get_checkpoint_info(f) for f in checkpoint_files], 
+                                   key=lambda x: (x[0], x[1]))
+        
+        # Keep only the 3 most recent
+        if len(sorted_checkpoints) > 3:
+            for epoch, batch, filepath in sorted_checkpoints[:-3]:
+                os.remove(filepath)
+                print(f"Removed old checkpoint: {os.path.basename(filepath)}")
+
+    def train(self, start_epoch=0, start_batch=None, num_epochs=20):
         print(f"Starting training for {num_epochs} epochs...")
         start_time = time.time()
-        no_improve_epochs = 0
         
         torch.cuda.reset_peak_memory_stats()
         self.peak_memory = 0
@@ -214,214 +360,124 @@ class Trainer:
         for epoch in range(start_epoch, num_epochs):
             self.model.train()
             epoch_loss = 0.0
+            batches_processed = 0
             
             for i, batch in enumerate(self.dataloader):
+                # Si on reprend au milieu d'une époque, ignorer les batches déjà traités
+                if epoch == start_epoch and start_batch is not None and i <= start_batch:
+                    continue
+                    
                 batch_loss = self.training_step(batch)
                 epoch_loss += batch_loss
+                batches_processed += 1
                 
                 if (i+1) % 10 == 0:
                     print(f"Epoch [{epoch+1}/{num_epochs}], Batch [{i+1}/{len(self.dataloader)}], "
                           f"Loss: {batch_loss:.6f}, Peak Memory: {self.peak_memory:.2f} MB")
+                
+                if (i+1) % 1000 == 0:
+                    self.save_checkpoint(epoch, batch_idx=i)
             
-            avg_train_loss = epoch_loss / len(self.dataloader)
+            # Utiliser le compteur
+            avg_train_loss = epoch_loss / max(batches_processed, 1)
             self.train_losses.append(avg_train_loss)
-            
-
-            torch.cuda.empty_cache()
-            
-            val_loss = self._validate()
-            self.val_losses.append(val_loss if val_loss is not None else 0)
             self.learning_rates.append(self.optimizer.param_groups[0]['lr'])
             
-            print(f"Epoch {epoch+1} completed - "
-                  f"Train Loss: {avg_train_loss:.6f}, "
-                  f"Val Loss: {val_loss:.6f if val_loss is not None else 'N/A'}, "
-                  f"Peak Memory: {self.peak_memory:.2f} MB")
+            print(f"Epoch {epoch+1} completed - Train Loss: {avg_train_loss:.6f}")
             
-            if val_loss is not None:
-                self.scheduler.step(val_loss)
+            # Sauvegarder à la fin de chaque époque
+            self.save_checkpoint(epoch)
+            
+            # Réinitialiser start_batch après la première époque
+            if epoch == start_epoch:
+                start_batch = None
                 
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
-                    self.save_checkpoint(epoch, is_best=True)
-                    no_improve_epochs = 0
-                else:
-                    no_improve_epochs += 1
-                
-                if no_improve_epochs >= patience:
-                    print(f"Early stopping at epoch {epoch+1}")
-                    break
-
-            if (epoch + 1) % 5 == 0:
-                self.save_checkpoint(epoch)
-                self.plot_progress()
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
         
         print(f"Training completed in {(time.time()-start_time)/60:.2f} minutes")
-        print(f"Peak memory usage: {self.peak_memory:.2f} MB")
-        self.plot_progress()
-
-    def _validate(self):
-        """Validate the model on the validation dataset"""
-        if not self.val_dataloader:
-            return None
-            
-        self.model.eval()
-        val_loss = 0.0
-        
-        with torch.no_grad():
-            for batch in self.val_dataloader:
-                sigma, noisy, clean = batch
-                sigma = sigma.to(self.device).float()
-                noisy = noisy.to(self.device).float()
-                clean = clean.to(self.device).float()
-                
-                x_hat = self.model(noisy, sigma)
-                loss = self.criterion(x_hat, clean)
-                val_loss += loss.item()
-        
-        return val_loss / len(self.val_dataloader)
-
     
     def load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        self.best_val_loss = checkpoint['best_val_loss']
-        start_epoch = checkpoint['epoch']  
-        print(f"Checkpoint chargé (epoch {start_epoch})")
-        return start_epoch  
-    
-    def save_checkpoint(self, epoch, is_best=False):
-        """Save model checkpoint"""
-        self.current_epoch = epoch  
         
-        checkpoint = {
-            'epoch': epoch + 1,  
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'best_val_loss': self.best_val_loss,
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
-            'learning_rates': self.learning_rates,
-            'rng_state': torch.get_rng_state(),
-            'cuda_rng_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None
-        }
+        start_epoch = checkpoint['epoch']
+        start_batch = checkpoint.get('batch_idx', None)
         
-    
-        checkpoint_path = f"{self.output_dir}/checkpoints/checkpoint_epoch_{epoch}.pt"
-        torch.save(checkpoint, checkpoint_path)
-        print(f"Checkpoint saved: {checkpoint_path}")
+        # Restaurer les listes de métriques
+        self.train_losses = checkpoint.get('train_losses', [])
+        self.learning_rates = checkpoint.get('learning_rates', [])
         
-        if is_best:
-            best_path = f"{self.output_dir}/checkpoints/best_model.pt"
-            torch.save(checkpoint, best_path)
-            print(f"Best model saved: {best_path}")
-            
-        checkpoint_files = sorted(glob.glob(f"{self.output_dir}/checkpoints/checkpoint_epoch_*.pt"))
-        if len(checkpoint_files) > 5:  # Keep only the 5 most recent checkpoints
-            for old_file in checkpoint_files[:-5]:
-                os.remove(old_file)
-
-
-
-    def plot_progress(self):
-        """Plot and save training progress"""
-        plt.figure(figsize=(15, 10))
+        # Restaurer l'état des générateurs aléatoires pour la reproductibilité
+        if 'rng_state' in checkpoint:
+            torch.set_rng_state(checkpoint['rng_state'])
+        if 'cuda_rng_state' in checkpoint and torch.cuda.is_available():
+            torch.cuda.set_rng_state(checkpoint['cuda_rng_state'])
         
-
-        plt.subplot(2, 1, 1)
-        plt.plot(self.train_losses, label='Training Loss')
-        if self.val_losses:
-            plt.plot(self.val_losses, label='Validation Loss')
-        plt.title('Training and Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.grid(True)
-        plt.legend()
+        print(f"Checkpoint loaded from epoch {start_epoch}")
+        if start_batch is not None:
+            print(f"Resuming from batch {start_batch}")
         
-        plt.subplot(2, 1, 2)
-        plt.plot(self.learning_rates)
-        plt.title('Learning Rate')
-        plt.xlabel('Epoch')
-        plt.ylabel('Learning Rate')
-        plt.grid(True)
-        plt.yscale('log')
-        
-    
-        plt.tight_layout()
-        plt.savefig(f"{self.output_dir}/training_progress.png")
-        plt.close()
-        
-        import pandas as pd
-        df = pd.DataFrame({
-            'epoch': range(1, len(self.train_losses) + 1),
-            'train_loss': self.train_losses,
-            'val_loss': self.val_losses if self.val_losses else [0] * len(self.train_losses),
-            'learning_rate': self.learning_rates
-        })
-        df.to_csv(f"{self.output_dir}/training_metrics.csv", index=False)
-
+        return start_epoch, start_batch
 
 if __name__ == "__main__":
     import argparse
+    from torch.utils.data import Subset
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=str, help='Checkpoint to resume from')
+    parser.add_argument('--auto_resume', action='store_true', help='Automatically find latest checkpoint')
+    parser.add_argument('--subset_size', type=int, default=1000000, help='Size of subset for testing')
     args = parser.parse_args()
-  
 
-    dataset = GRAND_DC2_TracesDataset(
-        rootpath='/sps/grand/DC2Training/ZHAireS',
+    dataset = GRAND_H5_TracesDataset(
+        h5_file_path='/sps/grand/selbouch/h5_files/grand_data.h5',
         num_realizations=2,
-        noise_range=(0.1, 3),
+        snr_range_db=(-10, 20),  # SNR range in dB
+        normalize=True,  # Enable normalization
+        chunk_size=1000,    
+        cache_size=500 
     )
-    
-
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    subset_indices = list(range(args.subset_size))
+    train_subset = Subset(dataset, subset_indices)
     
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=32,  
+        train_subset,
+        batch_size=128,
         shuffle=True,
-        num_workers=1,  
+        num_workers=1,
         pin_memory=True,
         persistent_workers=True,
         drop_last=True
     )
-    """val_loader = DataLoader(
-        val_dataset,
-        batch_size=64,  
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True,
-        persistent_workers=True
-    )"""
-
-
-    model = PRUNet(in_nc=3)
     
-
+    model = PRUNet(in_nc=3, nb=2, nc=[64, 128, 256, 512, 1024])
+    
     trainer = Trainer(
         model=model,
         dataloader=train_loader,
-        val_dataloader=None,
         lr=1e-3,
-        output_dir='./output'
+        output_dir='/sps/grand/selbouch/output'
     )
 
-    if args.resume:
-        start_epoch = trainer.load_checkpoint(args.resume)  
-    else:
-        start_epoch = 0  
+    # Gestion de la reprise
+    start_epoch = 0
+    start_batch = None
+    
+    if args.auto_resume:
+        latest_checkpoint = find_latest_checkpoint('/sps/grand/selbouch/output/checkpoints')
+        if latest_checkpoint:
+            print(f"Auto-resuming from: {latest_checkpoint}")
+            start_epoch, start_batch = trainer.load_checkpoint(latest_checkpoint)
+        else:
+            print("No checkpoint found, starting fresh training")
+    elif args.resume:
+        start_epoch, start_batch = trainer.load_checkpoint(args.resume)
 
     try:
-        trainer.train(num_epochs=100,start_epoch=start_epoch) 
+        trainer.train(num_epochs=50, start_epoch=start_epoch, start_batch=start_batch)
     except KeyboardInterrupt:
         print("Checkpointing before exit...")
         trainer.save_checkpoint(trainer.current_epoch)
     
-    torch.save(model.state_dict(), "./output/final_model.pt")
+    torch.save(model.state_dict(), "/sps/grand/selbouch/output/final_model_1M.pth")
